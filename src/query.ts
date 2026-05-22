@@ -11,6 +11,11 @@ import type {
 
 const seg = (s: string): string => encodeURIComponent(s)
 
+/** The valid field names of a row type — its string keys. For an untyped
+ *  collection (`from('books')`) this resolves to `string`; for a typed
+ *  `from<Book>('books')` a misspelled field name becomes a compile error. */
+type FieldOf<T> = keyof T & string
+
 const snakeFilters = (filters: Filter[]): Filter[] =>
   filters.map((f) => ({ ...f, field: toSnake(f.field) }))
 
@@ -43,8 +48,9 @@ abstract class Executable<R> implements PromiseLike<R> {
   }
 }
 
-/** Shared `.eq() / .gt() / ...` filter chain for select / update / delete. */
-abstract class Filterable<R> extends Executable<R> {
+/** Shared `.eq() / .gt() / ...` filter chain for select / update / delete.
+ *  `TRow` is the row type, so filter field names are checked against it. */
+abstract class Filterable<TRow, R> extends Executable<R> {
   protected readonly filters: Filter[] = []
 
   private add(field: string, op: FilterOp, value?: unknown): this {
@@ -52,43 +58,43 @@ abstract class Filterable<R> extends Executable<R> {
     return this
   }
 
-  eq(field: string, value: unknown): this {
+  eq(field: FieldOf<TRow>, value: unknown): this {
     return this.add(field, 'eq', value)
   }
-  neq(field: string, value: unknown): this {
+  neq(field: FieldOf<TRow>, value: unknown): this {
     return this.add(field, 'neq', value)
   }
-  gt(field: string, value: unknown): this {
+  gt(field: FieldOf<TRow>, value: unknown): this {
     return this.add(field, 'gt', value)
   }
-  gte(field: string, value: unknown): this {
+  gte(field: FieldOf<TRow>, value: unknown): this {
     return this.add(field, 'gte', value)
   }
-  lt(field: string, value: unknown): this {
+  lt(field: FieldOf<TRow>, value: unknown): this {
     return this.add(field, 'lt', value)
   }
-  lte(field: string, value: unknown): this {
+  lte(field: FieldOf<TRow>, value: unknown): this {
     return this.add(field, 'lte', value)
   }
-  like(field: string, pattern: string): this {
+  like(field: FieldOf<TRow>, pattern: string): this {
     return this.add(field, 'like', pattern)
   }
-  ilike(field: string, pattern: string): this {
+  ilike(field: FieldOf<TRow>, pattern: string): this {
     return this.add(field, 'ilike', pattern)
   }
-  in(field: string, values: unknown[]): this {
+  in(field: FieldOf<TRow>, values: unknown[]): this {
     return this.add(field, 'in', values)
   }
-  isNull(field: string): this {
+  isNull(field: FieldOf<TRow>): this {
     return this.add(field, 'is_null', true)
   }
-  notNull(field: string): this {
+  notNull(field: FieldOf<TRow>): this {
     return this.add(field, 'is_null', false)
   }
 }
 
 /** A read query: filters + projection + ordering + pagination. */
-export class SelectBuilder<T = Row> extends Filterable<ResultSet<T>> {
+export class SelectBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   private readonly orderBy: OrderBy[] = []
   private take?: number
   private skip?: number
@@ -101,7 +107,7 @@ export class SelectBuilder<T = Row> extends Filterable<ResultSet<T>> {
     super()
   }
 
-  order(field: string, opts: { desc?: boolean } = {}): this {
+  order(field: FieldOf<T>, opts: { desc?: boolean } = {}): this {
     this.orderBy.push({ field, desc: opts.desc ?? false })
     return this
   }
@@ -143,7 +149,7 @@ export class SelectBuilder<T = Row> extends Filterable<ResultSet<T>> {
 }
 
 /** An update scoped by filters. */
-export class UpdateBuilder<T = Row> extends Filterable<ResultSet<T>> {
+export class UpdateBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   constructor(
     private readonly transport: Transport,
     private readonly collection: string,
@@ -166,7 +172,7 @@ export class UpdateBuilder<T = Row> extends Filterable<ResultSet<T>> {
 }
 
 /** A delete scoped by filters. At least one filter is required. */
-export class DeleteBuilder<T = Row> extends Filterable<ResultSet<T>> {
+export class DeleteBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   constructor(
     private readonly transport: Transport,
     private readonly collection: string,
@@ -213,7 +219,7 @@ export class Collection<T = Row> {
   }
 
   /** Start a read query. Passing no columns selects them all. */
-  select(...columns: string[]): SelectBuilder<T> {
+  select(...columns: FieldOf<T>[]): SelectBuilder<T> {
     return new SelectBuilder<T>(
       this.transport,
       this.collection,

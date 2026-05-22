@@ -64,7 +64,21 @@ await cradler.from("books").delete().eq("id", id);
 
 Every insert / query / update / delete resolves to `{ rows, count }`.
 
-Pass a row type for full typing: `cradler.from<Book>("books")`.
+Pass a row type for full typing: `cradler.from<Book>("books")` — filter,
+order, and select field names are then checked against `Book` at compile
+time, so a misspelled field is caught before the call ever runs.
+
+### Reserved fields
+
+Every row automatically has three Cradler-managed fields — read them, but
+never set them:
+
+- **`id`** — a unique identifier, generated on insert.
+- **`createdAt`** — when the row was created.
+- **`updatedAt`** — updated on every change.
+
+You can filter and order by them, but any `id` / `createdAt` / `updatedAt`
+you pass to `insert()` or `update()` is ignored — Cradler always sets them.
 
 ### Filters
 
