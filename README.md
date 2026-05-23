@@ -106,6 +106,11 @@ const files = await cradler.storage.list("covers/");
 await cradler.storage.remove("covers/dune.png");
 ```
 
+**When you save a file reference in the database, store the path
+(`"covers/dune.png"`), not the URL.** URLs from `getUrl()` are short-lived
+signed URLs that expire; persisting them leads to broken links. Resolve
+the path to a fresh URL with `getUrl()` whenever you need to display it.
+
 ## Errors
 
 Any non-2xx response throws a `CradlerError` with `.status`, `.code` and
