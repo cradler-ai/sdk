@@ -106,6 +106,32 @@ const files = await cradler.storage.list("covers/");
 await cradler.storage.remove("covers/dune.png");
 ```
 
+### Image compression
+
+Pass `{ compress: true }` to shrink and re-encode images on the device
+before they leave the browser. Defaults: `webp`, max 2000×2000, quality
+0.85 — typically 90%+ smaller than a raw phone photo. Non-image bodies
+(PDFs, SVGs, zips, plain blobs) are passed through unchanged, so it's
+safe to set on every upload.
+
+When compression changes the format, the stored path's extension is
+rewritten to match. Use the returned `path` when you save a reference:
+
+```ts
+const { path } = await cradler.storage.upload("avatars/cat.jpg", file, {
+  compress: true,
+});
+// `path` is "avatars/cat.webp" — save *this* in the database.
+
+// Tune it:
+await cradler.storage.upload("photos/sunset.jpg", file, {
+  compress: { maxWidth: 1600, quality: 0.9, format: "webp" },
+});
+```
+
+Browser-only. In Node, `compress: true` throws; upload original bytes
+from the server side.
+
 **When you save a file reference in the database, store the path
 (`"covers/dune.png"`), not the URL.** URLs from `getUrl()` are short-lived
 signed URLs that expire; persisting them leads to broken links. Resolve

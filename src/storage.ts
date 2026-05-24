@@ -1,6 +1,27 @@
+import {
+  compressImage,
+  isCompressibleImage,
+  rewriteExtension,
+  type CompressOptions,
+} from './compress'
 import { CradlerError } from './errors'
 import type { Transport } from './http'
 import type { StorageFile, UploadBody } from './types'
+
+export interface UploadOptions {
+  /** Override the auto-detected `Content-Type` sent to storage. */
+  contentType?: string
+  /**
+   * Compress and re-encode image uploads in the browser before they leave
+   * the device. Pass `true` for sensible defaults, or an object to tune.
+   *
+   * Non-image bodies and SVGs are passed through unchanged.
+   *
+   * When compression changes the format, the stored path's extension is
+   * rewritten to match — check the returned `path` for the actual key.
+   */
+  compress?: boolean | CompressOptions
+}
 
 /**
  * File storage for a project — upload, download, list and delete files.
@@ -15,20 +36,40 @@ export class StorageClient {
   async upload(
     path: string,
     body: UploadBody,
-    options: { contentType?: string } = {},
+    options: UploadOptions = {},
   ): Promise<{ path: string }> {
+    let finalPath = path
+    let finalBody: UploadBody = body
+    let detectedType: string | undefined
+
+    if (options.compress && body instanceof Blob && isCompressibleImage(body)) {
+      const compressOpts =
+        options.compress === true ? {} : options.compress
+      const format = compressOpts.format ?? 'webp'
+      const compressed = await compressImage(body, compressOpts)
+      if (compressed !== body) {
+        finalBody = compressed
+        finalPath = rewriteExtension(path, format)
+        detectedType = compressed.type
+      }
+    }
+
     const res = await this.transport.request<{
       path: string
       upload_url: string
-    }>('POST', '/storage/upload-url', { path })
+    }>('POST', '/storage/upload-url', { path: finalPath })
 
     const headers: Record<string, string> = {}
-    if (options.contentType) headers['content-type'] = options.contentType
+    const contentType =
+      options.contentType ??
+      detectedType ??
+      (finalBody instanceof Blob ? finalBody.type : undefined)
+    if (contentType) headers['content-type'] = contentType
 
     const put = await this.transport.fetchUrl(
       'PUT',
       res.upload_url,
-      body,
+      finalBody,
       headers,
     )
     if (!put.ok) {
@@ -37,7 +78,7 @@ export class StorageClient {
         message: `file upload failed (HTTP ${put.status})`,
       })
     }
-    return { path }
+    return { path: finalPath }
   }
 
   /** A temporary, signed URL for downloading the file directly. */
