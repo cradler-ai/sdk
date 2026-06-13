@@ -56,5 +56,15 @@ export interface StorageFile {
   lastModified: string
 }
 
+/** Edge image-resize options for a public file's URL (Cloudflare-powered). */
+export interface ImageTransform {
+  /** Target width in pixels. */
+  width?: number
+  /** Target height in pixels. */
+  height?: number
+  /** Output quality, 1–100 (default ~85). */
+  quality?: number
+}
+
 /** Accepted file-content types for `storage.upload()`. */
 export type UploadBody = Blob | ArrayBuffer | string

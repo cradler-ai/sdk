@@ -6,7 +6,7 @@ import {
 } from './compress'
 import { CradlerError } from './errors'
 import type { Transport } from './http'
-import type { StorageFile, UploadBody } from './types'
+import type { ImageTransform, StorageFile, UploadBody } from './types'
 
 export interface UploadOptions {
   /** Override the auto-detected `Content-Type` sent to storage. */
@@ -21,6 +21,13 @@ export interface UploadOptions {
    * rewritten to match — check the returned `path` for the actual key.
    */
   compress?: boolean | CompressOptions
+  /**
+   * Store the file in the public, CDN-fronted bucket. Public files are loaded
+   * directly from a stable URL (`getPublicUrl`) with no round trip and no
+   * signature — fast and edge-cached. Use for avatars, post images, anything
+   * meant to be world-readable. Defaults to `false` (private, signed URLs).
+   */
+  public?: boolean
 }
 
 /**
@@ -32,12 +39,21 @@ export interface UploadOptions {
 export class StorageClient {
   constructor(private readonly transport: Transport) {}
 
-  /** Upload a file. Resolves once the bytes are stored. */
+  // The public base (`<custom-domain>/<projectId>`) is fetched once from the
+  // gateway and cached, so `getPublicUrl` builds URLs with no per-call round
+  // trip. `null` once fetched means public storage isn't configured.
+  private publicBase: Promise<string | null> | undefined
+
+  /** Upload a file. Resolves once the bytes are stored.
+   *
+   * For a public upload, the result also includes `publicUrl` — a stable,
+   * CDN-cached URL you can store and render directly.
+   */
   async upload(
     path: string,
     body: UploadBody,
     options: UploadOptions = {},
-  ): Promise<{ path: string }> {
+  ): Promise<{ path: string; publicUrl?: string }> {
     let finalPath = path
     let finalBody: UploadBody = body
     let detectedType: string | undefined
@@ -57,7 +73,11 @@ export class StorageClient {
     const res = await this.transport.request<{
       path: string
       upload_url: string
-    }>('POST', '/storage/upload-url', { path: finalPath })
+      public_url?: string
+    }>('POST', '/storage/upload-url', {
+      path: finalPath,
+      public: options.public ?? false,
+    })
 
     const headers: Record<string, string> = {}
     const contentType =
@@ -78,10 +98,58 @@ export class StorageClient {
         message: `file upload failed (HTTP ${put.status})`,
       })
     }
-    return { path: finalPath }
+    return res.public_url
+      ? { path: finalPath, publicUrl: res.public_url }
+      : { path: finalPath }
   }
 
-  /** A temporary, signed URL for downloading the file directly. */
+  /**
+   * A stable, CDN-cached URL for a PUBLIC file (one uploaded with
+   * `{ public: true }`). No signature, no expiry, no round trip after the
+   * first call. Pass `transform` to have the edge serve a resized, re-encoded
+   * variant — ideal for thumbnails in a feed.
+   *
+   * Throws if public storage isn't configured for this deployment.
+   */
+  async getPublicUrl(
+    path: string,
+    transform?: ImageTransform,
+  ): Promise<string> {
+    const base = await this.resolvePublicBase()
+    if (!base) {
+      throw new CradlerError(0, {
+        code: 'public_storage_disabled',
+        message: 'public storage is not configured for this project',
+      })
+    }
+    const objectPath = path.replace(/^\/+/, '')
+    const u = new URL(base) // e.g. https://files.cradler.ai/<projectId>
+    const prefix = u.pathname.replace(/^\/+|\/+$/g, '')
+    const fullKey = prefix ? `${prefix}/${objectPath}` : objectPath
+    const opts = transformOptions(transform)
+    return opts
+      ? `${u.origin}/cdn-cgi/image/${opts}/${fullKey}`
+      : `${u.origin}/${fullKey}`
+  }
+
+  private resolvePublicBase(): Promise<string | null> {
+    if (!this.publicBase) {
+      this.publicBase = this.transport
+        .request<{ public_enabled: boolean; public_url: string | null }>(
+          'GET',
+          '/storage/config',
+        )
+        .then((c) => (c.public_enabled ? c.public_url : null))
+        .catch((err) => {
+          // Don't cache a transient failure — let the next call retry.
+          this.publicBase = undefined
+          throw err
+        })
+    }
+    return this.publicBase
+  }
+
+  /** A temporary, signed URL for downloading a PRIVATE file directly. */
   async getUrl(path: string): Promise<string> {
     const res = await this.transport.request<{
       path: string
@@ -103,12 +171,19 @@ export class StorageClient {
     return res.blob()
   }
 
-  /** List stored files, optionally under a path prefix. */
-  async list(prefix = ''): Promise<StorageFile[]> {
-    const query = prefix ? `?prefix=${encodeURIComponent(prefix)}` : ''
+  /** List stored files, optionally under a path prefix. Pass
+   * `{ public: true }` to list the public bucket instead of the private one. */
+  async list(
+    prefix = '',
+    options: { public?: boolean } = {},
+  ): Promise<StorageFile[]> {
+    const params = new URLSearchParams()
+    if (prefix) params.set('prefix', prefix)
+    if (options.public) params.set('public', 'true')
+    const query = params.toString()
     const res = await this.transport.request<{
       files: Array<{ path: string; size: number; last_modified: string }>
-    }>('GET', `/storage/list${query}`)
+    }>('GET', `/storage/list${query ? `?${query}` : ''}`)
     return res.files.map((f) => ({
       path: f.path,
       size: f.size,
@@ -116,8 +191,27 @@ export class StorageClient {
     }))
   }
 
-  /** Delete a file. */
-  async remove(path: string): Promise<void> {
-    await this.transport.request('POST', '/storage/delete', { path })
+  /** Delete a file. Pass `{ public: true }` for a file stored as public. */
+  async remove(
+    path: string,
+    options: { public?: boolean } = {},
+  ): Promise<void> {
+    await this.transport.request('POST', '/storage/delete', {
+      path,
+      public: options.public ?? false,
+    })
   }
+}
+
+/** Serialize image-transform options into a Cloudflare `/cdn-cgi/image/`
+ * option string, or `''` when there's nothing to transform. */
+function transformOptions(t?: ImageTransform): string {
+  if (!t) return ''
+  const parts: string[] = []
+  if (t.width) parts.push(`width=${t.width}`)
+  if (t.height) parts.push(`height=${t.height}`)
+  if (t.quality) parts.push(`quality=${t.quality}`)
+  if (parts.length === 0) return ''
+  parts.push('format=auto') // edge picks webp/avif per the client
+  return parts.join(',')
 }
