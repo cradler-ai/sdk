@@ -89,22 +89,36 @@ Chain as many as you need:
 
 ## Files and images
 
+Files are **private by default** — read them through a short-lived signed URL.
+Mark an upload **public** to store it in a CDN-backed bucket and get a stable
+URL that loads fast worldwide, with optional on-the-fly resizing.
+
 ```ts
-// Upload — body is a Blob, ArrayBuffer, or string
-await cradler.storage.upload("covers/dune.png", file, {
-  contentType: "image/png",
+// Private upload (default) — body is a Blob, ArrayBuffer, or string
+await cradler.storage.upload("invoices/2026.pdf", file);
+
+// A temporary signed URL to display or download a private file
+const url = await cradler.storage.getUrl("invoices/2026.pdf");
+
+// Public upload — stored on the CDN; returns a stable, cacheable URL
+const { path, publicUrl } = await cradler.storage.upload("covers/dune.png", file, {
+  public: true,
 });
 
-// A temporary signed URL to display or download the file
-const url = await cradler.storage.getUrl("covers/dune.png");
+// A stable public URL, optionally resized at the edge (ideal for thumbnails).
+// No round trip, no signature — drop it straight into an <img src>.
+const thumb = await cradler.storage.getPublicUrl(path, { width: 300 });
 
-// Download as a Blob
-const blob = await cradler.storage.download("covers/dune.png");
-
-// List (optionally by prefix) and delete
+// Download as a Blob, list (optionally by prefix), and delete
+const blob = await cradler.storage.download("invoices/2026.pdf");
 const files = await cradler.storage.list("covers/");
-await cradler.storage.remove("covers/dune.png");
+await cradler.storage.remove("covers/dune.png", { public: true });
 ```
+
+`getPublicUrl` resizing (`width` / `height` / `quality`) is powered by
+Cloudflare at the edge: the original is stored once, and each size is generated
+and cached on demand — served as a modern format (WebP/AVIF) automatically. It
+works only for files uploaded with `{ public: true }`.
 
 ### Image compression
 
@@ -132,10 +146,11 @@ await cradler.storage.upload("photos/sunset.jpg", file, {
 Browser-only. In Node, `compress: true` throws; upload original bytes
 from the server side.
 
-**When you save a file reference in the database, store the path
-(`"covers/dune.png"`), not the URL.** URLs from `getUrl()` are short-lived
-signed URLs that expire; persisting them leads to broken links. Resolve
-the path to a fresh URL with `getUrl()` whenever you need to display it.
+**For private files, save the path (`"invoices/2026.pdf"`), not the URL.**
+URLs from `getUrl()` are short-lived signed URLs that expire; persisting them
+leads to broken links. Resolve the path to a fresh URL with `getUrl()` whenever
+you need to display it. (Public `publicUrl` / `getPublicUrl()` URLs are stable —
+those are safe to store.)
 
 ## Errors
 
