@@ -22,7 +22,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "demo": "tsx examples/demo.ts"
+    "demo": "tsx examples/demo.ts",
+    "test": "tsx --test test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
