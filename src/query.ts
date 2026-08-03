@@ -20,7 +20,12 @@ const snakeFilters = (filters: Filter[]): Filter[] =>
   filters.map((f) => ({ ...f, field: toSnake(f.field) }))
 
 function camelResultSet<T>(res: ResultSet<Row>): ResultSet<T> {
-  return { rows: res.rows.map((r) => camelKeys<T>(r)), count: res.count }
+  const out: ResultSet<T> = {
+    rows: res.rows.map((r) => camelKeys<T>(r)),
+    count: res.count,
+  }
+  if (res.total !== undefined) out.total = res.total
+  return out
 }
 
 /** A builder whose result is produced lazily and can be `await`ed directly. */
@@ -98,6 +103,7 @@ export class SelectBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   private readonly orderBy: OrderBy[] = []
   private take?: number
   private skip?: number
+  private countMode?: 'exact'
 
   constructor(
     private readonly transport: Transport,
@@ -122,6 +128,15 @@ export class SelectBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
     return this
   }
 
+  /** Also return `total` — how many rows match the filters overall, ignoring
+   *  limit/offset. Needed for pagination, since `count` only ever reports the
+   *  size of the page you got back. Costs an extra counting pass, so it is
+   *  opt-in. */
+  count(mode: 'exact' = 'exact'): this {
+    this.countMode = mode
+    return this
+  }
+
   /** Run the query and return the first row, or null if none matched. */
   async first(): Promise<T | null> {
     this.take = 1
@@ -142,13 +157,14 @@ export class SelectBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
         })),
         ...(this.take !== undefined ? { limit: this.take } : {}),
         ...(this.skip !== undefined ? { offset: this.skip } : {}),
+        ...(this.countMode !== undefined ? { count: this.countMode } : {}),
       },
     )
     return camelResultSet<T>(res)
   }
 }
 
-/** An update scoped by filters. */
+/** An update scoped by filters. At least one filter is required. */
 export class UpdateBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   constructor(
     private readonly transport: Transport,
@@ -159,6 +175,14 @@ export class UpdateBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   }
 
   protected async run(): Promise<ResultSet<T>> {
+    if (this.filters.length === 0) {
+      return Promise.reject(
+        new Error(
+          'update() requires at least one filter — ' +
+            'refusing to rewrite the entire collection',
+        ),
+      )
+    }
     const res = await this.transport.request<ResultSet<Row>>(
       'POST',
       `/${seg(this.collection)}/update`,
@@ -227,7 +251,8 @@ export class Collection<T = Row> {
     )
   }
 
-  /** Start an update. Chain `.eq()` etc. to scope which rows change. */
+  /** Start an update. Chain `.eq()` etc. to scope which rows change —
+   *  at least one filter is required. */
   update(patch: Partial<T>): UpdateBuilder<T> {
     return new UpdateBuilder<T>(this.transport, this.collection, patch)
   }

@@ -29,7 +29,13 @@ export type Row = Record<string, unknown>
 /** The result of any insert / query / update / delete. */
 export interface ResultSet<T = Row> {
   rows: T[]
+  /** How many rows came back in `rows`. Bounded by `limit`, so this is a page
+   *  size — not the number of rows that matched. For that, see `total`. */
   count: number
+  /** How many rows match the filters in total, ignoring limit/offset. Present
+   *  only on a query that asked for it with `.count('exact')`, because it
+   *  costs a second counting pass over the collection. */
+  total?: number
 }
 
 /** The columns a collection currently has (auto-evolved by the gateway). */

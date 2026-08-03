@@ -8,6 +8,13 @@ import { CradlerError } from './errors'
 import type { Transport } from './http'
 import type { ImageTransform, StorageFile, UploadBody } from './types'
 
+/** Byte length of an upload body, for the size the upload URL is signed for. */
+function byteLength(body: UploadBody): number {
+  if (typeof body === 'string') return new TextEncoder().encode(body).length
+  if (body instanceof Blob) return body.size
+  return body.byteLength
+}
+
 export interface UploadOptions {
   /** Override the auto-detected `Content-Type` sent to storage. */
   contentType?: string
@@ -77,6 +84,10 @@ export class StorageClient {
     }>('POST', '/storage/upload-url', {
       path: finalPath,
       public: options.public ?? false,
+      // Declared up front so the upload URL is signed for exactly this many
+      // bytes — the bucket then rejects anything larger. Uploads go straight
+      // to storage, so this is the only point at which a size limit can bind.
+      size: byteLength(finalBody),
     })
 
     const headers: Record<string, string> = {}
