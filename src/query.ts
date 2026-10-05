@@ -1,4 +1,5 @@
 import { camelKeys, snakeKeys, toSnake } from './case'
+import { CradlerError } from './errors'
 import type { Transport } from './http'
 import type {
   Filter,
@@ -15,6 +16,27 @@ const seg = (s: string): string => encodeURIComponent(s)
  *  collection (`from('books')`) this resolves to `string`; for a typed
  *  `from<Book>('books')` a misspelled field name becomes a compile error. */
 type FieldOf<T> = keyof T & string
+
+/** JSON has no NaN or Infinity: `JSON.stringify` silently writes them as
+ *  `null`, so a division by zero would be stored as a missing value with no
+ *  error. Refuse them before anything is sent. Nested values (JSON columns)
+ *  are checked too — they are serialized the same way. */
+function assertFinite(value: unknown, where: string): void {
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new CradlerError(0, {
+      code: 'invalid_value',
+      message:
+        `${where} is ${value}, which cannot be stored (JSON has no NaN or ` +
+        `Infinity — it would silently become null). Check the calculation ` +
+        `that produced it, or pass null explicitly.`,
+    })
+  }
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => assertFinite(v, `${where}[${i}]`))
+  } else if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+    for (const [k, v] of Object.entries(value)) assertFinite(v, `${where}.${k}`)
+  }
+}
 
 const snakeFilters = (filters: Filter[]): Filter[] =>
   filters.map((f) => ({ ...f, field: toSnake(f.field) }))
@@ -59,6 +81,20 @@ abstract class Filterable<TRow, R> extends Executable<R> {
   protected readonly filters: Filter[] = []
 
   private add(field: string, op: FilterOp, value?: unknown): this {
+    // JSON drops `undefined`, and the gateway reads a missing value as null —
+    // so `.eq('ownerId', undefined)` would silently become `owner_id IS NULL`
+    // and `.neq(...)` `IS NOT NULL`. On update/delete that rewrites or removes
+    // rows the caller never meant to touch. An undefined value is always a
+    // bug in the calling code (an unset variable), so refuse it loudly.
+    if (value === undefined) {
+      throw new CradlerError(0, {
+        code: 'invalid_filter',
+        message:
+          `${op}('${field}', undefined): the filter value is undefined. ` +
+          `Pass null to compare against null, or use isNull() / notNull().`,
+      })
+    }
+    assertFinite(value, `${op}('${field}') value`)
     this.filters.push({ field, op, value })
     return this
   }
@@ -183,6 +219,9 @@ export class UpdateBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
         ),
       )
     }
+    for (const [k, v] of Object.entries(this.patch as Record<string, unknown>)) {
+      assertFinite(v, `update field '${k}'`)
+    }
     const res = await this.transport.request<ResultSet<Row>>(
       'POST',
       `/${seg(this.collection)}/update`,
@@ -231,9 +270,13 @@ export class Collection<T = Row> {
 
   /** Insert one row or many. The collection and its columns auto-evolve. */
   async insert(data: Partial<T> | Partial<T>[]): Promise<ResultSet<T>> {
-    const rows = (Array.isArray(data) ? data : [data]).map((d) =>
-      snakeKeys(d as Record<string, unknown>),
-    )
+    const list = Array.isArray(data) ? data : [data]
+    list.forEach((d, i) => {
+      for (const [k, v] of Object.entries(d as Record<string, unknown>)) {
+        assertFinite(v, list.length > 1 ? `row ${i} field '${k}'` : `field '${k}'`)
+      }
+    })
+    const rows = list.map((d) => snakeKeys(d as Record<string, unknown>))
     const res = await this.transport.request<ResultSet<Row>>(
       'POST',
       `/${seg(this.collection)}`,
@@ -242,12 +285,18 @@ export class Collection<T = Row> {
     return camelResultSet<T>(res)
   }
 
-  /** Start a read query. Passing no columns selects them all. */
-  select(...columns: FieldOf<T>[]): SelectBuilder<T> {
+  /** Start a read query. Passing no columns selects them all.
+   *  Supabase-style `select('*')` and `select('title, year')` also work —
+   *  AI tools write them out of habit, so they are accepted as-is. */
+  select(...columns: (FieldOf<T> | '*')[]): SelectBuilder<T> {
+    const fields = (columns as string[])
+      .flatMap((c) => c.split(','))
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0)
     return new SelectBuilder<T>(
       this.transport,
       this.collection,
-      columns.length > 0 ? columns : undefined,
+      fields.length > 0 && !fields.includes('*') ? fields : undefined,
     )
   }
 

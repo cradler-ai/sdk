@@ -57,12 +57,22 @@ const { rows, count } = await cradler
 // A single row, or null
 const book = await cradler.from("books").select().eq("id", id).first();
 
-// Update / delete — delete requires at least one filter
+// Update / delete — both require at least one filter
 await cradler.from("books").update({ inStock: false }).eq("id", id);
 await cradler.from("books").delete().eq("id", id);
 ```
 
-Every insert / query / update / delete resolves to `{ rows, count }`.
+Every insert / query / update / delete resolves to `{ rows, count }`, where
+`count` is `rows.length`.
+
+A query returns **at most 50 rows unless you call `.limit()`** (maximum
+1000 per call); page with `.limit()` + `.offset()`. `count` is the size of
+the page, not how many rows match — chain `.count("exact")` and read
+`total` for that:
+
+```ts
+const { rows, total } = await cradler.from("books").select().limit(20).count("exact");
+```
 
 Pass a row type for full typing: `cradler.from<Book>("books")` — filter,
 order, and select field names are then checked against `Book` at compile
@@ -87,14 +97,21 @@ Chain as many as you need:
 `eq` · `neq` · `gt` · `gte` · `lt` · `lte` · `like` · `ilike` · `in` ·
 `isNull` · `notNull`
 
+A filter value of `undefined` throws (`invalid_filter`) — it almost always
+means an unset variable. Use `isNull()` / `notNull()` to match missing values.
+
 ## Files and images
+
+**Storage requires the `service` key, so call it from server-side code only**
+(an API route, server action or backend job) — never from the browser. A
+browser app sends the file to its own server route, which uploads it.
 
 Files are **private by default** — read them through a short-lived signed URL.
 Mark an upload **public** to store it in a CDN-backed bucket and get a stable
 URL that loads fast worldwide, with optional on-the-fly resizing.
 
 ```ts
-// Private upload (default) — body is a Blob, ArrayBuffer, or string
+// Private upload (default) — body is a Blob/File, ArrayBuffer, typed array / Buffer, or string
 await cradler.storage.upload("invoices/2026.pdf", file);
 
 // A temporary signed URL to display or download a private file
@@ -122,8 +139,10 @@ works only for files uploaded with `{ public: true }`.
 
 ### Image compression
 
-Pass `{ compress: true }` to shrink and re-encode images on the device
-before they leave the browser. Defaults: `webp`, max 2000×2000, quality
+Pass `{ compress: true }` to shrink and re-encode images before upload.
+It needs browser canvas APIs (`createImageBitmap`), while storage needs the
+`service` key, which must never be in a browser — so in practice, leave
+`compress` off for now and upload from server code. Defaults: `webp`, max 2000×2000, quality
 0.85 — typically 90%+ smaller than a raw phone photo. Non-image bodies
 (PDFs, SVGs, zips, plain blobs) are passed through unchanged, so it's
 safe to set on every upload.
@@ -143,8 +162,7 @@ await cradler.storage.upload("photos/sunset.jpg", file, {
 });
 ```
 
-Browser-only. In Node, `compress: true` throws; upload original bytes
-from the server side.
+Browser-only. In Node or edge runtimes, `compress: true` throws.
 
 **For private files, save the path (`"invoices/2026.pdf"`), not the URL.**
 URLs from `getUrl()` are short-lived signed URLs that expire; persisting them
@@ -154,9 +172,10 @@ those are safe to store.)
 
 ## Errors
 
-Any non-2xx response throws a `CradlerError` with `.status`, `.code` and
-`.message` — for example `schema_conflict` when a value clashes with a
-column's type.
+Any non-2xx response throws a `CradlerError` with `.status`, `.code`,
+`.message`, `.details` and `.requestId` — for example `schema_conflict` when
+a value clashes with a column's type. Quote `requestId` when reporting a
+problem; it is in Cradler's server logs too.
 
 ```ts
 import { CradlerError } from "@cradler/sdk";

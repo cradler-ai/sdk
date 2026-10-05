@@ -15,7 +15,10 @@ export class Transport {
     if (typeof fetchFn !== 'function') {
       throw new Error('no global fetch found — pass `fetch` in client options')
     }
-    this.fetchFn = fetchFn
+    // Never call fetch as a method of this object: Workers and browsers throw
+    // "Illegal invocation" unless `this` is the global scope. Calling through
+    // a closure works for the default and for an unbound `window.fetch` alike.
+    this.fetchFn = (input, init) => fetchFn(input, init)
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -53,11 +56,18 @@ export class Transport {
 
     if (!response.ok) {
       const error = (parsed as { error?: unknown } | undefined)?.error
+      // The body carries `request_id`; the header is the fallback for an
+      // error body that isn't the gateway's own shape.
+      const headerId = response.headers.get('x-request-id') ?? undefined
       throw new CradlerError(
         response.status,
         isErrorBody(error)
-          ? error
-          : { code: 'http_error', message: `HTTP ${response.status}` },
+          ? { request_id: headerId, ...error }
+          : {
+              code: 'http_error',
+              message: `HTTP ${response.status}`,
+              request_id: headerId,
+            },
       )
     }
 
@@ -75,7 +85,10 @@ export class Transport {
     headers?: Record<string, string>,
   ): Promise<Response> {
     try {
-      return await this.fetchFn(url, { method, body, headers })
+      // Every UploadBody is a valid fetch body at runtime; the DOM lib types
+      // typed arrays more narrowly (ArrayBufferView<ArrayBuffer>) than fetch
+      // implementations accept.
+      return await this.fetchFn(url, { method, body: body as BodyInit, headers })
     } catch (cause) {
       throw new CradlerError(0, {
         code: 'network_error',

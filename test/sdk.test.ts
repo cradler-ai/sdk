@@ -161,3 +161,208 @@ describe('errors', () => {
     assert.equal(err?.status, 402)
   })
 })
+
+describe('fetch binding', () => {
+  // Workers and browsers reject `fetch` called with any `this` but the
+  // global scope ("Illegal invocation"). Node doesn't care, so emulate it.
+  function strictFetch(reply: unknown): typeof fetch {
+    return function (this: unknown) {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError('Illegal invocation')
+      }
+      return Promise.resolve(Response.json(reply))
+    } as unknown as typeof fetch
+  }
+
+  it('calls the global fetch without rebinding `this`', async () => {
+    globalThis.fetch = strictFetch(emptySet.body)
+    await db().from('users').select()
+  })
+
+  it('calls a caller-supplied unbound fetch without rebinding `this`', async () => {
+    const client = createClient({
+      url: 'https://gateway.example',
+      projectId: 'proj',
+      apiKey: 'k',
+      fetch: strictFetch(emptySet.body),
+    })
+    await client.from('users').select()
+  })
+})
+
+describe('filter values', () => {
+  // JSON drops `undefined` and the gateway reads a missing value as null, so
+  // an unset variable used to turn `.neq('status', x)` into `IS NOT NULL` —
+  // on delete(), that removes every row with any status at all.
+  it('refuses an undefined filter value before anything is sent', async () => {
+    const calls = stub([emptySet])
+    const unset: string | undefined = undefined
+    await assert.rejects(
+      async () => db().from('posts').delete().neq('status', unset),
+      (e: { code?: string }) => e.code === 'invalid_filter',
+    )
+    await assert.rejects(
+      async () => db().from('posts').update({ a: 1 }).eq('ownerId', unset),
+      (e: { code?: string }) => e.code === 'invalid_filter',
+    )
+    assert.equal(calls.length, 0, 'nothing should have been sent')
+  })
+
+  it('still sends an explicit null', async () => {
+    const calls = stub([emptySet])
+    await db().from('posts').select().eq('ownerId', null)
+    assert.deepEqual(bodyOf(calls[0]).filters, [
+      { field: 'owner_id', op: 'eq', value: null },
+    ])
+  })
+})
+
+describe('upload bodies', () => {
+  it('sizes a Blob from another realm or a polyfill', async () => {
+    // jsdom / happy-dom / fetch-blob Blobs are not `instanceof` this realm's
+    // Blob. They used to fall through to `.byteLength` (undefined), so no
+    // size was declared and no content type was sent.
+    const calls = stub([
+      { body: { path: 'a.txt', upload_url: 'https://bucket.example/put' } },
+      { body: {} },
+    ])
+    const foreign = {
+      size: 5,
+      type: 'text/plain',
+      arrayBuffer: async () => new ArrayBuffer(5),
+      stream: () => new Blob(['hello']).stream(),
+      text: async () => 'hello',
+      slice: () => new Blob(['hello']),
+    }
+    await db().storage.upload('a.txt', foreign as unknown as Blob)
+    assert.equal(bodyOf(calls[0]).size, 5)
+    const headers = calls[1].init.headers as Record<string, string>
+    assert.equal(headers['content-type'], 'text/plain')
+  })
+
+  it('sizes a typed array / Buffer view by its own bytes', async () => {
+    const calls = stub([
+      { body: { path: 'a.bin', upload_url: 'https://bucket.example/put' } },
+      { body: {} },
+    ])
+    const view = new Uint8Array(new ArrayBuffer(100), 10, 20)
+    await db().storage.upload('a.bin', view)
+    assert.equal(bodyOf(calls[0]).size, 20)
+  })
+
+  it('rejects a body with no known length before asking for a URL', async () => {
+    const calls = stub([
+      { body: { path: 'a.bin', upload_url: 'https://bucket.example/put' } },
+    ])
+    await assert.rejects(
+      () =>
+        db().storage.upload(
+          'a.bin',
+          new Blob(['x']).stream() as unknown as ArrayBuffer,
+        ),
+      (e: { code?: string }) => e.code === 'invalid_body',
+    )
+    assert.equal(calls.length, 0)
+  })
+})
+
+describe('getPublicUrl', () => {
+  function publicStub() {
+    return stub([
+      {
+        body: {
+          public_enabled: true,
+          public_url: 'https://files.example/proj',
+        },
+      },
+    ])
+  }
+
+  it('encodes the path the same way the gateway does', async () => {
+    // The gateway builds `publicUrl` with Python's quote(key, safe="/").
+    // A raw `#` used to turn the rest of the name into a URL fragment.
+    publicStub()
+    const url = await db().storage.getPublicUrl("photos/my cat #1 (it's).png")
+    assert.equal(
+      url,
+      'https://files.example/proj/photos/my%20cat%20%231%20%28it%27s%29.png',
+    )
+  })
+
+  it('encodes the path in a transformed URL too', async () => {
+    publicStub()
+    const url = await db().storage.getPublicUrl('/a?b.png', { width: 300 })
+    assert.equal(
+      url,
+      'https://files.example/cdn-cgi/image/width=300,format=auto/proj/a%3Fb.png',
+    )
+  })
+})
+
+describe('error request id', () => {
+  it('exposes the gateway request id as requestId', async () => {
+    stub([
+      {
+        status: 422,
+        body: {
+          error: {
+            code: 'validation_failed',
+            message: 'bad',
+            request_id: 'abc123',
+          },
+        },
+      },
+    ])
+    const err = await db()
+      .from('users')
+      .select()
+      .then(() => null)
+      .catch((e) => e as { requestId?: string })
+    assert.equal(err?.requestId, 'abc123')
+  })
+})
+
+describe('Supabase-style habits', () => {
+  // Seen in production 422s: select('amount,reason,ts'), select('*'),
+  // from('lifeItems'). AI tools write these from Supabase muscle memory.
+  it("select('*') selects every column", async () => {
+    const calls = stub([emptySet])
+    await db().from('t').select('*')
+    assert.equal(bodyOf(calls[0]).select, undefined)
+  })
+
+  it('select splits a comma-separated column string', async () => {
+    const calls = stub([emptySet])
+    await db().from('t').select('amount, reason,createdAt')
+    assert.deepEqual(bodyOf(calls[0]).select, ['amount', 'reason', 'created_at'])
+  })
+
+  it('from() snake_cases a camelCase collection name', async () => {
+    const calls = stub([emptySet])
+    await db().from('lifeItems').select()
+    assert.match(calls[0].url, /\/life_items\/query$/)
+  })
+})
+
+describe('non-finite numbers', () => {
+  // JSON.stringify(NaN) === 'null': a NaN used to be stored as null, silently.
+  it('insert refuses NaN / Infinity, nested too, and sends nothing', async () => {
+    const calls = stub([emptySet])
+    await assert.rejects(() => db().from('t').insert({ avg: 0 / 0 }), /NaN/)
+    await assert.rejects(
+      () => db().from('t').insert([{ a: 1 }, { meta: { score: Infinity } }]),
+      /row 1 field 'meta'\.score is Infinity/,
+    )
+    assert.equal(calls.length, 0)
+  })
+
+  it('update and filters refuse them as well', async () => {
+    const calls = stub([emptySet])
+    await assert.rejects(
+      () => db().from('t').update({ ratio: -Infinity }).eq('id', 'x'),
+      /-Infinity/,
+    )
+    assert.throws(() => db().from('t').select().gt('score', NaN), /NaN/)
+    assert.equal(calls.length, 0)
+  })
+})

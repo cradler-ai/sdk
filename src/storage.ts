@@ -8,11 +8,53 @@ import { CradlerError } from './errors'
 import type { Transport } from './http'
 import type { ImageTransform, StorageFile, UploadBody } from './types'
 
+/**
+ * Whether `v` is a Blob/File. Duck-typed rather than `instanceof Blob`: a Blob
+ * from another realm (an iframe, a test DOM such as jsdom/happy-dom) or a
+ * polyfill (fetch-blob, formdata-node) is not an instance of this realm's
+ * global `Blob`, and some runtimes have no global `Blob` at all — where
+ * `instanceof` would throw a ReferenceError.
+ */
+function isBlob(v: unknown): v is Blob {
+  if (typeof Blob !== 'undefined' && v instanceof Blob) return true
+  if (typeof v !== 'object' || v === null) return false
+  const b = v as { size?: unknown; type?: unknown; arrayBuffer?: unknown }
+  return (
+    typeof b.size === 'number' &&
+    typeof b.type === 'string' &&
+    typeof b.arrayBuffer === 'function'
+  )
+}
+
 /** Byte length of an upload body, for the size the upload URL is signed for. */
 function byteLength(body: UploadBody): number {
   if (typeof body === 'string') return new TextEncoder().encode(body).length
-  if (body instanceof Blob) return body.size
-  return body.byteLength
+  if (isBlob(body)) return body.size
+  // ArrayBuffer, or any typed-array / DataView / Node Buffer.
+  const n = (body as { byteLength?: unknown } | null)?.byteLength
+  if (typeof n === 'number') return n
+  // Anything else (a ReadableStream, a Node stream, a plain object) has no
+  // known length to sign, and fetch can't send most of it anyway — fail here,
+  // before an upload URL is issued, with a message that says what to pass.
+  throw new CradlerError(0, {
+    code: 'invalid_body',
+    message:
+      'storage.upload() body must be a Blob/File, an ArrayBuffer (or typed ' +
+      'array / Buffer), or a string',
+  })
+}
+
+/**
+ * Percent-encode one path segment the way the gateway does (Python's
+ * `quote(key, safe="/")`), so `getPublicUrl()` returns the very URL that
+ * `upload()` reported. `encodeURIComponent` leaves `!'()*` alone; quote
+ * escapes them, so do too.
+ */
+function encodeSegment(s: string): string {
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
 }
 
 export interface UploadOptions {
@@ -65,7 +107,7 @@ export class StorageClient {
     let finalBody: UploadBody = body
     let detectedType: string | undefined
 
-    if (options.compress && body instanceof Blob && isCompressibleImage(body)) {
+    if (options.compress && isBlob(body) && isCompressibleImage(body)) {
       const compressOpts =
         options.compress === true ? {} : options.compress
       const format = compressOpts.format ?? 'webp'
@@ -94,7 +136,7 @@ export class StorageClient {
     const contentType =
       options.contentType ??
       detectedType ??
-      (finalBody instanceof Blob ? finalBody.type : undefined)
+      (isBlob(finalBody) && finalBody.type ? finalBody.type : undefined)
     if (contentType) headers['content-type'] = contentType
 
     const put = await this.transport.fetchUrl(
@@ -133,7 +175,15 @@ export class StorageClient {
         message: 'public storage is not configured for this project',
       })
     }
-    const objectPath = path.replace(/^\/+/, '')
+    // Same normalisation as the gateway's object key (trim, drop leading
+    // slashes), then encode each segment: a raw `#`, `?` or `%` in a file name
+    // would otherwise cut the URL short or be decoded into a different key.
+    const objectPath = path
+      .trim()
+      .replace(/^\/+/, '')
+      .split('/')
+      .map(encodeSegment)
+      .join('/')
     const u = new URL(base) // e.g. https://files.cradler.ai/<projectId>
     const prefix = u.pathname.replace(/^\/+|\/+$/g, '')
     const fullKey = prefix ? `${prefix}/${objectPath}` : objectPath

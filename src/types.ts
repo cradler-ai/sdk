@@ -72,5 +72,6 @@ export interface ImageTransform {
   quality?: number
 }
 
-/** Accepted file-content types for `storage.upload()`. */
-export type UploadBody = Blob | ArrayBuffer | string
+/** Accepted file-content types for `storage.upload()`. `ArrayBufferView`
+ *  covers typed arrays and Node's `Buffer` (e.g. from `fs.readFile`). */
+export type UploadBody = Blob | ArrayBuffer | ArrayBufferView | string

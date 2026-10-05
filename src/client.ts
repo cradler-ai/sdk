@@ -1,3 +1,4 @@
+import { toSnake } from './case'
 import { Transport } from './http'
 import { Collection } from './query'
 import { StorageClient } from './storage'
@@ -20,7 +21,9 @@ export class CradlerClient {
    * `client.from<Book>('books')`.
    */
   from<T = Row>(collection: string): Collection<T> {
-    return new Collection<T>(this.transport, collection)
+    // Collections are snake_case like columns; `from('lifeItems')` used to be
+    // rejected outright, while camelCase field names were converted.
+    return new Collection<T>(this.transport, toSnake(collection))
   }
 }
 
