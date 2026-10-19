@@ -78,6 +78,50 @@ Pass a row type for full typing: `cradler.from<Book>("books")` — filter,
 order, and select field names are then checked against `Book` at compile
 time, so a misspelled field is caught before the call ever runs.
 
+### Counts, sums and averages
+
+For any statistic — a total, an average, a count per category — use
+`aggregate()`. It runs in the database over **every** matching row, so it
+stays correct past the 1000 rows a single query can return:
+
+```ts
+// One row per status: how many orders, their revenue, the average order
+const { rows } = await cradler
+  .from("orders")
+  .aggregate(
+    { fn: "count" },
+    { fn: "sum", field: "amount", as: "revenue" },
+    { fn: "avg", field: "amount" },
+  )
+  .groupBy("status")
+  .gte("createdAt", "2026-01-01")
+  .order("revenue", { desc: true });
+// [{ status: "paid", count: 1840, revenue: 51230.5, avgAmount: 27.84 }, ...]
+
+// No groupBy() — a single row over everything that matches
+const { rows: [stats] } = await cradler
+  .from("orders")
+  .aggregate({ fn: "max", field: "amount" })
+  .eq("status", "paid");
+```
+
+Functions: `count` (no field = rows; with a field = rows where it is not
+null), `sum` and `avg` (numeric fields), `min` and `max` (numbers, text,
+dates). Each value comes back under its `as` key, or `count` / `sumAmount`
+style by default. `.order()` takes a `groupBy` field or one of those keys;
+`.limit()` / `.offset()` page through the groups (default 100, max 1000),
+and `.count("exact")` returns `total`, the number of groups.
+
+### Listing collections
+
+```ts
+const collections = await cradler.listCollections();
+// [{ collection: "orders", columns: { id: "uuid", amount: "numeric", ... } }, ...]
+```
+
+With an `anon` key, only the collections that key is allowed to read are
+listed.
+
 ### Reserved fields
 
 Every row automatically has three Cradler-managed fields — read them, but

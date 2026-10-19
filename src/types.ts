@@ -44,6 +44,20 @@ export interface SchemaResult {
   columns: Record<string, string>
 }
 
+export type AggregateFn = 'count' | 'sum' | 'avg' | 'min' | 'max'
+
+/** One value computed over every matching row (or every row of a group). */
+export interface Aggregate<F extends string = string> {
+  fn: AggregateFn
+  /** The field to aggregate. Required except for `count`, which without a
+   *  field counts rows (with one, the rows where that field is not null). */
+  field?: F
+  /** The key the value comes back under. Defaults to `count` for a row
+   *  count, otherwise the function and field: `sum` of `amount` is
+   *  `sumAmount`. */
+  as?: string
+}
+
 export interface ClientOptions {
   /** Base URL of the data gateway, e.g. `http://localhost:8000`. */
   url: string

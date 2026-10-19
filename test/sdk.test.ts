@@ -366,3 +366,68 @@ describe('non-finite numbers', () => {
     assert.equal(calls.length, 0)
   })
 })
+
+describe('aggregate', () => {
+  it('sends group_by, aggregates, filters and order in snake_case', async () => {
+    const calls = stub([emptySet])
+    await db()
+      .from('orders')
+      .aggregate(
+        { fn: 'count' },
+        { fn: 'sum', field: 'totalAmount', as: 'revenue' },
+        { fn: 'avg', field: 'totalAmount' },
+      )
+      .groupBy('shopId')
+      .eq('isPaid', true)
+      .order('avgTotalAmount', { desc: true })
+      .limit(20)
+      .count('exact')
+    assert.match(calls[0].url, /\/v1\/proj\/orders\/aggregate$/)
+    assert.deepEqual(bodyOf(calls[0]), {
+      group_by: ['shop_id'],
+      aggregates: [
+        { fn: 'count' },
+        { fn: 'sum', field: 'total_amount', as: 'revenue' },
+        { fn: 'avg', field: 'total_amount' },
+      ],
+      filters: [{ field: 'is_paid', op: 'eq', value: true }],
+      order: [{ field: 'avg_total_amount', desc: true }],
+      limit: 20,
+      count: 'exact',
+    })
+  })
+
+  it('returns group fields and default keys in camelCase', async () => {
+    stub([{
+      body: {
+        rows: [{ shop_id: 's1', sum_total_amount: 12.5 }],
+        count: 1,
+        total: 3,
+      },
+    }])
+    const res = await db()
+      .from('orders')
+      .aggregate({ fn: 'sum', field: 'totalAmount' })
+      .groupBy('shopId')
+    assert.deepEqual(res.rows, [{ shopId: 's1', sumTotalAmount: 12.5 }])
+    assert.equal(res.total, 3)
+  })
+})
+
+describe('listCollections', () => {
+  it('lists collections with camelCase column names', async () => {
+    const calls = stub([{
+      body: {
+        collections: [
+          { collection: 'life_items', columns: { id: 'uuid', due_at: 'timestamp with time zone' } },
+        ],
+      },
+    }])
+    const found = await db().listCollections()
+    assert.equal(calls[0].init.method, 'GET')
+    assert.match(calls[0].url, /\/v1\/proj\/collections$/)
+    assert.deepEqual(found, [
+      { collection: 'life_items', columns: { id: 'uuid', dueAt: 'timestamp with time zone' } },
+    ])
+  })
+})

@@ -2,6 +2,7 @@ import { camelKeys, snakeKeys, toSnake } from './case'
 import { CradlerError } from './errors'
 import type { Transport } from './http'
 import type {
+  Aggregate,
   Filter,
   FilterOp,
   OrderBy,
@@ -200,6 +201,83 @@ export class SelectBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   }
 }
 
+/** Counts, sums, averages, minimums and maximums computed by the database
+ *  over every matching row — optionally per group. Unlike `select()`, this is
+ *  not capped at one page: a sum over a million rows is a sum over a million
+ *  rows. `limit` / `offset` page through the groups instead. */
+export class AggregateBuilder<T = Row, R = Row> extends Filterable<
+  T,
+  ResultSet<R>
+> {
+  private readonly groups: string[] = []
+  private readonly orderBy: OrderBy[] = []
+  private take?: number
+  private skip?: number
+  private countMode?: 'exact'
+
+  constructor(
+    private readonly transport: Transport,
+    private readonly collection: string,
+    private readonly aggregates: Aggregate<FieldOf<T>>[],
+  ) {
+    super()
+  }
+
+  /** One result row per distinct combination of these fields. */
+  groupBy(...fields: FieldOf<T>[]): this {
+    this.groups.push(...fields)
+    return this
+  }
+
+  /** Sort the groups by a `groupBy` field or an aggregate key (its `as`, or
+   *  the default such as `sumAmount`). Defaults to the `groupBy` fields. */
+  order(key: string, opts: { desc?: boolean } = {}): this {
+    this.orderBy.push({ field: key, desc: opts.desc ?? false })
+    return this
+  }
+
+  /** Maximum number of groups to return (default 100, max 1000). */
+  limit(n: number): this {
+    this.take = n
+    return this
+  }
+
+  offset(n: number): this {
+    this.skip = n
+    return this
+  }
+
+  /** Also return `total` — the number of groups, ignoring limit/offset. */
+  count(mode: 'exact' = 'exact'): this {
+    this.countMode = mode
+    return this
+  }
+
+  protected async run(): Promise<ResultSet<R>> {
+    const res = await this.transport.request<ResultSet<Row>>(
+      'POST',
+      `/${seg(this.collection)}/aggregate`,
+      {
+        group_by: this.groups.map(toSnake),
+        aggregates: this.aggregates.map((a) => ({
+          fn: a.fn,
+          ...(a.field !== undefined ? { field: toSnake(a.field) } : {}),
+          ...(a.as !== undefined ? { as: toSnake(a.as) } : {}),
+        })),
+        filters: snakeFilters(this.filters),
+        order: this.orderBy.map((o) => ({
+          field: toSnake(o.field),
+          desc: o.desc,
+        })),
+        ...(this.take !== undefined ? { limit: this.take } : {}),
+        ...(this.skip !== undefined ? { offset: this.skip } : {}),
+        ...(this.countMode !== undefined ? { count: this.countMode } : {}),
+      },
+    )
+    return camelResultSet<R>(res)
+  }
+}
+
 /** An update scoped by filters. At least one filter is required. */
 export class UpdateBuilder<T = Row> extends Filterable<T, ResultSet<T>> {
   constructor(
@@ -298,6 +376,16 @@ export class Collection<T = Row> {
       this.collection,
       fields.length > 0 && !fields.includes('*') ? fields : undefined,
     )
+  }
+
+  /** Compute counts / sums / averages / min / max in the database, over every
+   *  matching row. Chain `.groupBy()` for one result per group and `.eq()`
+   *  etc. to filter. Pass a result row type for typing:
+   *  `aggregate<{ status: string; revenue: number }>(...)`. */
+  aggregate<R = Row>(
+    ...aggregates: Aggregate<FieldOf<T>>[]
+  ): AggregateBuilder<T, R> {
+    return new AggregateBuilder<T, R>(this.transport, this.collection, aggregates)
   }
 
   /** Start an update. Chain `.eq()` etc. to scope which rows change —

@@ -1,8 +1,8 @@
-import { toSnake } from './case'
+import { camelKeys, toSnake } from './case'
 import { Transport } from './http'
 import { Collection } from './query'
 import { StorageClient } from './storage'
-import type { ClientOptions, Row } from './types'
+import type { ClientOptions, Row, SchemaResult } from './types'
 
 /** The cradler client. Create one with `createClient()`. */
 export class CradlerClient {
@@ -24,6 +24,19 @@ export class CradlerClient {
     // Collections are snake_case like columns; `from('lifeItems')` used to be
     // rejected outright, while camelCase field names were converted.
     return new Collection<T>(this.transport, toSnake(collection))
+  }
+
+  /** Every collection in the project, with its columns. With an `anon` key,
+   *  only the collections that key is allowed to read. */
+  async listCollections(): Promise<SchemaResult[]> {
+    const res = await this.transport.request<{ collections: SchemaResult[] }>(
+      'GET',
+      '/collections',
+    )
+    return res.collections.map((c) => ({
+      collection: c.collection,
+      columns: camelKeys<Record<string, string>>(c.columns),
+    }))
   }
 }
 

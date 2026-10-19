@@ -1,6 +1,6 @@
 {
   "name": "@cradler/sdk",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Typed TypeScript client for the Cradler data API",
   "license": "MIT",
   "type": "module",
