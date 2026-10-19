@@ -431,3 +431,79 @@ describe('listCollections', () => {
     ])
   })
 })
+
+describe('warnings', () => {
+  it('surfaces gateway warnings on the result and on console.warn', async () => {
+    const warning =
+      "field 'used' has not been written to 'tokens' yet; treated as null on every row"
+    stub([{ body: { rows: [], count: 0, warnings: [warning] } }])
+    const printed: unknown[] = []
+    const realWarn = console.warn
+    console.warn = (...args: unknown[]) => { printed.push(args.join(' ')) }
+    try {
+      const res = await db().from('tokens').update({ used: true }).eq('used', false)
+      assert.deepEqual(res.warnings, [warning])
+      assert.deepEqual(printed, [`[cradler] ${warning}`])
+    } finally {
+      console.warn = realWarn
+    }
+  })
+
+  it('leaves warnings off a result that has none', async () => {
+    stub([emptySet])
+    const res = await db().from('tokens').select()
+    assert.equal('warnings' in res, false)
+  })
+})
+
+describe('upsert', () => {
+  it('sends rows and the conflict fields in snake_case', async () => {
+    const calls = stub([emptySet])
+    await db().from('users').upsert(
+      { emailAddress: 'a@x.io', fullName: 'A' },
+      { onConflict: 'emailAddress' },
+    )
+    assert.match(calls[0].url, /\/v1\/proj\/users\/upsert$/)
+    assert.deepEqual(bodyOf(calls[0]), {
+      rows: [{ email_address: 'a@x.io', full_name: 'A' }],
+      on_conflict: ['email_address'],
+    })
+  })
+
+  it("accepts Supabase's comma-separated onConflict and ignoreDuplicates", async () => {
+    const calls = stub([emptySet])
+    await db().from('targets').upsert([{ userId: 'u', platform: 'x' }], {
+      onConflict: 'userId, platform' as 'userId',
+      ignoreDuplicates: true,
+    })
+    assert.deepEqual(bodyOf(calls[0]).on_conflict, ['user_id', 'platform'])
+    assert.equal(bodyOf(calls[0]).ignore_duplicates, true)
+  })
+
+  it('leaves the conflict fields to the gateway default (id) when omitted', async () => {
+    const calls = stub([emptySet])
+    await db().from('posts').upsert({ id: 'x', title: 't' })
+    assert.equal('on_conflict' in bodyOf(calls[0]), false)
+  })
+
+  it('refuses NaN before anything is sent', async () => {
+    const calls = stub([emptySet])
+    await assert.rejects(() => db().from('posts').upsert({ id: 'x', score: NaN }))
+    assert.equal(calls.length, 0)
+  })
+})
+
+describe('insert unique', () => {
+  it('passes the unique fields as a query parameter', async () => {
+    const calls = stub([emptySet])
+    await db().from('users').insert({ emailAddress: 'a' }, { unique: ['emailAddress', 'tenantId'] })
+    assert.match(calls[0].url, /\/v1\/proj\/users\?unique=email_address%2Ctenant_id$/)
+    assert.deepEqual(bodyOf(calls[0]), [{ email_address: 'a' }])
+  })
+
+  it('sends a plain insert when unique is not given', async () => {
+    const calls = stub([emptySet])
+    await db().from('users').insert({ a: 1 })
+    assert.match(calls[0].url, /\/v1\/proj\/users$/)
+  })
+})

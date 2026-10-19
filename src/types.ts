@@ -36,6 +36,11 @@ export interface ResultSet<T = Row> {
    *  only on a query that asked for it with `.count('exact')`, because it
    *  costs a second counting pass over the collection. */
   total?: number
+  /** Things the gateway answered but wants you to know — today, a field the
+   *  call referenced that has never been written to the collection, so it
+   *  was treated as null on every row. Usually a typo, or a condition on a
+   *  field your inserts do not set yet. Also printed with `console.warn`. */
+  warnings?: string[]
 }
 
 /** The columns a collection currently has (auto-evolved by the gateway). */

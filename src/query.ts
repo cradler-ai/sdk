@@ -39,6 +39,27 @@ function assertFinite(value: unknown, where: string): void {
   }
 }
 
+/** One row or many, checked and converted for the wire. */
+function wireRows<T>(data: Partial<T> | Partial<T>[]): Row[] {
+  const list = Array.isArray(data) ? data : [data]
+  list.forEach((d, i) => {
+    for (const [k, v] of Object.entries(d as Record<string, unknown>)) {
+      assertFinite(v, list.length > 1 ? `row ${i} field '${k}'` : `field '${k}'`)
+    }
+  })
+  return list.map((d) => snakeKeys(d as Record<string, unknown>))
+}
+
+/** Field names given as one, several, or Supabase's comma-separated
+ *  `'a,b'`, in snake_case for the wire. */
+function fieldList(fields: string | string[] | undefined): string[] {
+  return (Array.isArray(fields) ? fields : [fields ?? ''])
+    .flatMap((f) => f.split(','))
+    .map((f) => f.trim())
+    .filter((f) => f.length > 0)
+    .map(toSnake)
+}
+
 const snakeFilters = (filters: Filter[]): Filter[] =>
   filters.map((f) => ({ ...f, field: toSnake(f.field) }))
 
@@ -48,6 +69,13 @@ function camelResultSet<T>(res: ResultSet<Row>): ResultSet<T> {
     count: res.count,
   }
   if (res.total !== undefined) out.total = res.total
+  // Dropping these is how a filter on a never-written field — which matches
+  // nothing — came across as a silent empty result: the gateway said why,
+  // and nobody saw it.
+  if (res.warnings?.length) {
+    out.warnings = res.warnings
+    for (const w of res.warnings) console.warn(`[cradler] ${w}`)
+  }
   return out
 }
 
@@ -346,19 +374,52 @@ export class Collection<T = Row> {
     private readonly collection: string,
   ) {}
 
-  /** Insert one row or many. The collection and its columns auto-evolve. */
-  async insert(data: Partial<T> | Partial<T>[]): Promise<ResultSet<T>> {
-    const list = Array.isArray(data) ? data : [data]
-    list.forEach((d, i) => {
-      for (const [k, v] of Object.entries(d as Record<string, unknown>)) {
-        assertFinite(v, list.length > 1 ? `row ${i} field '${k}'` : `field '${k}'`)
-      }
-    })
-    const rows = list.map((d) => snakeKeys(d as Record<string, unknown>))
+  /** Insert one row or many. The collection and its columns auto-evolve.
+   *
+   *  `unique` names fields that must not repeat across rows (together, if
+   *  several). The first insert that names them makes them unique for good;
+   *  from then on any insert of a duplicate fails with a 409
+   *  `constraint_violation` — even one that does not pass `unique`. */
+  async insert(
+    data: Partial<T> | Partial<T>[],
+    options: { unique?: FieldOf<T> | FieldOf<T>[] } = {},
+  ): Promise<ResultSet<T>> {
+    const unique = fieldList(options.unique)
+    const query = unique.length
+      ? `?unique=${encodeURIComponent(unique.join(','))}`
+      : ''
     const res = await this.transport.request<ResultSet<Row>>(
       'POST',
-      `/${seg(this.collection)}`,
-      rows,
+      `/${seg(this.collection)}${query}`,
+      wireRows(data),
+    )
+    return camelResultSet<T>(res)
+  }
+
+  /** Insert each row, or update the stored row with the same `onConflict`
+   *  values (default `id`). A row updates only the fields it includes.
+   *
+   *  The first upsert on a field makes it unique in the collection — so plain
+   *  inserts of a duplicate fail (409) from then on too. If the collection
+   *  already holds duplicates, that first upsert fails with a 409 saying how
+   *  many. `ignoreDuplicates` keeps a stored row as it is (and returns it)
+   *  instead of updating it: "insert unless it exists". */
+  async upsert(
+    data: Partial<T> | Partial<T>[],
+    options: {
+      onConflict?: FieldOf<T> | FieldOf<T>[]
+      ignoreDuplicates?: boolean
+    } = {},
+  ): Promise<ResultSet<T>> {
+    const onConflict = fieldList(options.onConflict)
+    const res = await this.transport.request<ResultSet<Row>>(
+      'POST',
+      `/${seg(this.collection)}/upsert`,
+      {
+        rows: wireRows(data),
+        ...(onConflict.length ? { on_conflict: onConflict } : {}),
+        ...(options.ignoreDuplicates ? { ignore_duplicates: true } : {}),
+      },
     )
     return camelResultSet<T>(res)
   }

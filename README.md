@@ -78,6 +78,46 @@ Pass a row type for full typing: `cradler.from<Book>("books")` — filter,
 order, and select field names are then checked against `Book` at compile
 time, so a misspelled field is caught before the call ever runs.
 
+### Upsert and unique fields
+
+Checking "does it exist?" and then inserting races: two requests can both
+see nothing and both insert. Let the database decide instead:
+
+```ts
+// Insert, or update the row with the same email. Only the fields you pass
+// are updated; the rest keep their stored values.
+await cradler.from("users").upsert(
+  { email, name },
+  { onConflict: "email" },
+);
+
+// "Insert unless it exists" — idempotent writes. A stored row is returned
+// unchanged, so a retry gets the original back.
+const { rows: [post] } = await cradler.from("posts").upsert(
+  { idempotencyKey, text },
+  { onConflict: "idempotencyKey", ignoreDuplicates: true },
+);
+
+// Refuse duplicates on a plain insert: a sign-up with a taken email throws
+// a CradlerError with status 409 and code "constraint_violation".
+await cradler.from("users").insert({ email, passwordHash }, { unique: "email" });
+```
+
+The first `upsert` (or `insert` with `unique`) that names a field makes it
+**unique in the collection for good**, so every later insert of a duplicate
+gets a 409 too — even one that does not pass `unique`. Several fields
+(`onConflict: ["userId", "platform"]`) are unique together. Rows with no
+value for the field are not compared. `onConflict` defaults to `id`.
+
+- If the collection already holds duplicates, that first call fails with a
+  409 that says how many. Merge or delete them, then retry.
+- Only the `service` key can make a field unique. The `anon` key can use a
+  field that is already unique, and needs both insert and update permission
+  to upsert.
+- There is no self-serve way to make a field non-unique again yet, so name
+  only fields that really must never repeat (emails, external ids,
+  idempotency keys) — not names, titles or statuses.
+
 ### Counts, sums and averages
 
 For any statistic — a total, an average, a count per category — use
@@ -143,6 +183,31 @@ Chain as many as you need:
 
 A filter value of `undefined` throws (`invalid_filter`) — it almost always
 means an unset variable. Use `isNull()` / `notNull()` to match missing values.
+
+### Fields that have no value
+
+A comparison never matches a row where the field is empty (`null`):
+`.eq("used", false)` skips rows whose `used` was never set, and
+`.neq("status", "done")` skips rows with no `status`. Use `isNull()` /
+`notNull()` to match on emptiness.
+
+A field nobody has written to the collection yet is empty on **every** row —
+the column does not exist yet. So, on a field like that:
+
+- `select()` / `aggregate()`: comparisons match nothing, `isNull()` matches
+  every row, and selecting the field returns `null`.
+- `update()` / `delete()`: comparisons match nothing, so **nothing is changed
+  or deleted** — and the call still succeeds. `isNull()` is refused
+  (`validation_failed`), since on a misspelt field it would hit every row.
+
+Every such call comes back with a `warnings` entry naming the field, also
+printed with `console.warn`. It is what a typo looks like, too.
+
+**If your code will later filter on a field — a flag like `used`,
+`revoked` or `processed` — write it explicitly on every insert**
+(`insert({ ..., used: false })`). Otherwise
+`update({ used: true }).eq("used", false)` changes nothing until some row
+has set the field, and a "claim it once" check reads as "already claimed".
 
 ## Files and images
 
